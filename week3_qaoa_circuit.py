@@ -166,11 +166,14 @@ def run_optimization(H, n, reps):
     return ansatz, res, history
 
 
-def sample_final_circuit(ansatz, params, n, shots):
+def sample_final_circuit(ansatz, params, n, shots, seed=42):
+    """seed fixes the shot sampling so counts are reproducible run to run.
+    The optimized energy above is already deterministic (exact statevector
+    estimator, fixed initialization) -- this only pins the sampling noise."""
     qc = ansatz.assign_parameters(params)
     qc.measure_all()
-    backend = AerSimulator()
-    job = backend.run(qc, shots=shots)
+    backend = AerSimulator(seed_simulator=seed)
+    job = backend.run(qc, shots=shots, seed_simulator=seed)
     counts = job.result().get_counts()
     return counts
 
