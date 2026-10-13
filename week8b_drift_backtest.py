@@ -1,6 +1,6 @@
 """
 Week 8b -- Walk-forward backtest with holdings drift between rebalances.
-by Luna Copilot
+
 Unlike week8_backtest.py, this script holds each selected portfolio between
 scheduled rebalances: holdings drift with daily asset returns, and transaction
 costs are charged only when the portfolio is actually reset. It reuses the
@@ -105,9 +105,7 @@ def walk_forward_with_drift(returns, train_days):
 
 
 def summarize_with_cagr(daily_returns):
-    annual_mean, volatility, ratio, drawdown = base.summarize(daily_returns)
-    wealth = float(np.prod(1 + daily_returns))
-    cagr = wealth ** (base.TRADING_DAYS / len(daily_returns)) - 1
+    annual_mean, volatility, ratio, drawdown, cagr = base.summarize(daily_returns)
     return annual_mean, cagr, volatility, ratio, drawdown
 
 

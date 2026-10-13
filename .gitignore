@@ -3,3 +3,5 @@ pycache/
 *.pyc
 .ipynb_checkpoints/
 *.egg-info/
+
+*.ipynb

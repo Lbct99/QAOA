@@ -1,6 +1,6 @@
 """
 Week 8 -- Classical walk-forward backtest harness.
-by claude C. 
+
 Question this answers, BEFORE any more quantum work or universe expansion:
     do the pipeline's portfolio models (equal-weight selection K=1, unequal
     weights K=2, and a few variants) actually beat plain 1/N out of sample,
@@ -19,9 +19,15 @@ Design:
     TRAIN_YEARS of daily returns, choose weights, hold them for the next
     TEST_DAYS trading days (~6 months). Test windows do NOT overlap, and the
     concatenated test returns form one continuous out-of-sample track.
-  - Costs: COST_BPS per unit of traded notional at each rebalance (weights
-    are drifted by realized returns before measuring turnover). The first
-    allocation is free.
+  - Drift-aware accounting: target weights are set at each rebalance and then
+    left to drift with realized returns until the next one. (An earlier
+    version of this script computed daily returns with constant weights, which
+    silently rebalances every day at no cost while still charging costs as if
+    weights drifted. That inconsistency is fixed here.)
+  - Costs: COST_BPS per unit of traded notional (buys plus sells) at each
+    rebalance, measured against the drifted weights. The first allocation is
+    free. A "1/N buy-and-hold" row (never rebalanced) is included as a check
+    that 1/N's result is not an artifact of periodic rebalancing.
   - Uncertainty: circular block bootstrap (BOOT_BLOCK-day blocks) of the
     paired daily returns gives 95% confidence intervals on the difference in
     return/vol between two strategies.
@@ -98,8 +104,17 @@ def choose_weights(mu, sigma, k_bits, budget, q, shrink):
     return W[np.argmin(f)]
 
 
+def drift_returns(test, w):
+    """Daily portfolio returns when target weights w are set at the start of `test`
+    and then left to drift (no rebalancing inside the window)."""
+    growth = np.cumprod(1 + test, axis=0)
+    g_prev = np.vstack([np.ones(test.shape[1]), growth[:-1]])
+    return (g_prev * test) @ w / (g_prev @ w)
+
+
 def self_check():
-    """The weight-based search must pick the same allocation as the pipeline's raw-unit objective."""
+    """1) the weight-based search must pick the same allocation as the pipeline's raw-unit
+    objective; 2) drift-aware daily returns must match explicit position tracking."""
     rng = np.random.default_rng(123)
     n = 6
     for _ in range(5):
@@ -118,7 +133,16 @@ def self_check():
                     best, best_f = y, f
             w = choose_weights(mu, sigma, k, 3, PIPE_Q, 0.0)
             assert np.allclose(w * 3, best), "weight-based search disagrees with the raw-unit objective"
-    print("Self-check passed: harness picks the same allocations as the pipeline's QUBO objective.\n")
+    r = rng.normal(0.0005, 0.02, size=(50, 4))
+    w0 = np.array([0.4, 0.3, 0.2, 0.1])
+    v, ref = w0.copy(), []
+    for day in r:
+        v_new = v * (1 + day)
+        ref.append(v_new.sum() / v.sum() - 1)
+        v = v_new
+    assert np.allclose(drift_returns(r, w0), ref), "drift accounting disagrees with explicit tracking"
+    print("Self-check passed: allocations match the pipeline's QUBO objective; "
+          "daily returns match explicit position tracking.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +187,7 @@ def walk_forward(returns, train_days):
                 sigma = np.cov(train.T) * TRADING_DAYS
                 w = choose_weights(mu, sigma, **spec)
             test = R[t:t + TEST_DAYS]
-            p = test @ w
+            p = drift_returns(test, w)
             if w_prev is not None:
                 drifted = w_prev * growth_prev / (w_prev @ growth_prev)
                 moved = np.abs(w - drifted).sum()
@@ -176,6 +200,9 @@ def walk_forward(returns, train_days):
                          traded=float(np.mean(traded)) if traded else 0.0,
                          weights=weights_hist)
     first, last = starts[0], starts[-1] + TEST_DAYS - 1
+    w_bh = np.ones(n) / n
+    out["1/N buy-and-hold"] = dict(daily=drift_returns(R[first:last + 1], w_bh),
+                                   traded=0.0, weights=[w_bh])
     span = (returns.index[first].date(), returns.index[last].date(), len(starts))
     return out, span
 
@@ -185,7 +212,8 @@ def summarize(r):
     vol = r.std(ddof=1) * np.sqrt(TRADING_DAYS)
     cum = np.concatenate([[1.0], np.cumprod(1 + r)])
     mdd = (cum / np.maximum.accumulate(cum) - 1).min()
-    return ret, vol, ret / vol, mdd
+    cagr = cum[-1] ** (TRADING_DAYS / len(r)) - 1
+    return ret, vol, ret / vol, mdd, cagr
 
 
 def ratio_diff_ci(ra, rb, rng):
@@ -226,13 +254,13 @@ def main():
           f"{nper} non-overlapping test periods ===")
     print(f"Out-of-sample track: {d0} -> {d1}   (costs: {COST_BPS} bps per unit traded)\n")
 
-    print(f"{'strategy':22s} {'return':>8s} {'vol':>7s} {'ret/vol':>8s} {'maxDD':>8s} {'traded/reb':>11s}")
+    print(f"{'strategy':22s} {'ann.mean':>9s} {'CAGR':>7s} {'vol':>7s} {'mean/vol':>9s} {'maxDD':>8s} {'traded/reb':>11s}")
     for name, r in res.items():
-        ret, vol, ratio, mdd = summarize(r["daily"])
-        print(f"{name:22s} {ret:8.1%} {vol:7.1%} {ratio:8.2f} {mdd:8.1%} {r['traded']:11.1%}")
+        ret, vol, ratio, mdd, cagr = summarize(r["daily"])
+        print(f"{name:22s} {ret:9.1%} {cagr:7.1%} {vol:7.1%} {ratio:9.2f} {mdd:8.1%} {r['traded']:11.1%}")
 
-    comps = [(n, BASELINE) for n in STRATEGIES if n != BASELINE] + PAIRS
-    print("\nDifference in return/vol, 95% block-bootstrap CI (an interval that excludes 0 = distinguishable from noise):")
+    comps = [(n, BASELINE) for n in STRATEGIES if n != BASELINE] + [("1/N buy-and-hold", BASELINE)] + PAIRS
+    print("\nDifference in mean/vol, 95% block-bootstrap CI (an interval that excludes 0 = distinguishable from noise):")
     for a, b in comps:
         point, lo, hi = ratio_diff_ci(res[a]["daily"], res[b]["daily"], rng)
         verdict = "CI excludes 0" if (lo > 0 or hi < 0) else "CI includes 0"
@@ -245,14 +273,20 @@ def main():
     for name in ("K1 B=3 (pipeline)", "K2 B=3"):
         wh = res[name]["weights"]
         print(f"  {name:20s} changed at {changes(wh)} of {len(wh) - 1} rebalances")
+    k1w, k2w = res["K1 B=3 (pipeline)"]["weights"], res["K2 B=3"]["weights"]
+    equal_w = 1 / STRATEGIES["K2 B=3"]["budget"]
+    same = sum(np.allclose(a, b) for a, b in zip(k1w, k2w))
+    unequal = sum(w.max() > equal_w + 1e-9 for w in k2w)
+    print(f"  K2 chose the same weights as K1 at {same} of {len(k2w)} rebalances "
+          f"and used unequal weights at {unequal}.")
 
-    print("\n=== Robustness: return/vol by training-window length ===")
+    print("\n=== Robustness: mean/vol by training-window length ===")
     by_years = {TRAIN_YEARS: (res, (d0, d1, nper))}
     for ty in ROBUSTNESS_TRAIN_YEARS:
         by_years[ty] = walk_forward(returns, ty * TRADING_DAYS)
     years = sorted(by_years)
     print(f"{'strategy':22s}" + "".join(f"{str(y) + 'y train':>10s}" for y in years))
-    for name in STRATEGIES:
+    for name in by_years[years[0]][0]:
         row = "".join(f"{summarize(by_years[y][0][name]['daily'])[2]:10.2f}" for y in years)
         print(f"{name:22s}{row}")
     for y in years:
