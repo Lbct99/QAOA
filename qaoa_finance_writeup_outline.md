@@ -1,6 +1,6 @@
 # Portfolio Optimization with QAOA on Real IBM Hardware — Write-up Outline
 
-*A working outline — numbers are filled in from your actual runs where you have them; bracketed notes mark what still needs your input or a final decision. Updated: Section 8 (continuous-weight extension and classical backtest) is new; Section 8.5 now holds the backtest and budget-sweep results; placeholders in Sections 2, 6 and 7 are filled.*
+*A working outline — numbers are filled in from your actual runs where you have them; bracketed notes mark what still needs your input or a final decision. Updated: Section 8 (continuous-weight extension and classical backtest) is new; Section 8.5 now holds the backtest and budget-sweep results; Section 11 (learned QAOA initializer study) is new; placeholders in Sections 2, 6 and 7 are filled.*
 
 ---
 
@@ -158,15 +158,72 @@
 
 - On the evidence so far, no classical variant (K=2, min-variance, shrinkage) justifies more quantum work: none beat 1/N, K=2 rarely differs from K=1, and the budget sweep shows the optimizer's stock choices were no better than random ones. Optional follow-ups, each cheap with the existing harness: settings where K=2 actually uses unequal weights (e.g. a higher return weight q) if its value is to be tested at all; and different asset classes (a hypothesis worth testing: optimizers may matter more when assets differ widely in risk).
 - Universe expansion only after that, since more assets under the current objective mostly give the optimizer more room to fit noise. Practical issues to plan for: crypto trades every day while equities do not (calendar alignment), much higher volatility, and metals/energy usually enter as ETF or futures proxies with their own data quirks.
-- Production direction: not ONNX-exporting QAOA itself (no neural network in the loop) — instead, a learned `(γ,β)`-initialization network (replacing the linear-ramp heuristic) as the actual ONNX/Azure-servable artifact, amortizing the simulator-optimization cost across problem instances.
+- Production direction: QAOA itself is not ONNX-exportable (no neural network in the loop). The initializer study (Section 11) found that no trained network is needed: the servable artifact is a rule (a few constant starts in normalized units, the scale formula, and a budgeted polish). It can still be wrapped as a small function or ONNX graph for pipeline uniformity, described honestly as a rule.
+
+## 11. Learned (γ,β) initializer study (production track)
+
+*Question: how few optimizer evaluations are needed to get good QAOA parameters for these portfolio problems, and does a learned model help? The answer is an engineering result about the optimization step; the finance model it serves has no demonstrated edge (Section 8).*
+
+**11.1 Design**
+
+- Dataset: 600 six-stock problems (random 6-of-10 subsets, 2–4-year trailing windows, risk weight 0.2–2, budget 3, penalty 2× the minimum feasible). Label = best-known p=2 parameters, the best of 22 POWELL starts, polished, in canonical form (β has period π; the sign flip is a symmetry). For 84% of instances at least two starts agree on the best energy, so labels are best-known, not proven optimal.
+- Speed and correctness: an exact numpy QAOA simulator, checked against Qiskit's `QAOAAnsatz` to 1e-9 before any data is generated.
+- Split by time: 339 train / 85 validation / 120 test (windows ending from 2024-08-19), 180-day purge. Metric: share of test instances whose energy is within 1% of the best-known, measured as a share of the energy span, after k evaluations; also final quality and total evaluations.
+
+**11.2 What the dataset showed**
+
+- p=2 reaches roughly 70% of the way from the uniform-superposition energy to the ground state (median approximation ratio 0.929 vs 0.772).
+- First-layer parameters concentrate in normalized units (γ₁·scale median −0.69, 10th–90th percentile −1.21 to −0.51; β₁ median 0.63). The second layer is multimodal, and a minority basin sits near β₁ ≈ π/2.
+- The pipeline's linear ramp starts about 31% of the span away on average and needs about 300 evaluations to reach within 1% in 81% of runs. A scale-aware ramp I proposed was worse (22%): a negative result worth stating.
+
+**11.3 Starts compared (120 test instances, tolerance 1% of span)**
+
+| Start | within 1% @1 | @25 | @100 | After convergence | Median total evaluations |
+| --- | --- | --- | --- | --- | --- |
+| Pipeline ramp | 0% | 8% | 55% | 80% | 266 |
+| One constant | 50% | 76% | 82% | 83% | 133 |
+| Ridge regression | 2% | 13% | 69% | 83% | 210 |
+| kNN (k=7) | 56% | 68% | 81% | 86% | 130 |
+| Best-known labels (ceiling) | 100% | 100% | 100% | 100% | 82 |
+
+- A single constant (γ₁·scale, γ₂·scale, β₁, β₂) = (−0.74, −1.08, 0.65, 0.40) beats the ramp after 25 evaluations by +68% \[+59%, +77%\]. This held at tolerances of 0.5% (+65%) and 2% (+52%) and with a 365-day purge (+68%), and the constant itself barely moved with the training set.
+- The learned models are not neural networks: ridge regression on 30 permutation- invariant features, and nearest neighbours, both in numpy. Ridge picked the strongest regularization offered and averages across basins (worse than the constant up to 100 evaluations). kNN never beat the constant after 25 evaluations (−2% to −9%; three of four runs exclude zero in the constant's favor). No evidence that a learned model beats the constant.
+
+**11.4 Covering instead of predicting.** Greedy selection of 4 constant starts on earlier windows (pool coverage 85%, 91%, 95%, 96%). At equal total evaluations against one constant given the same budget: K=2 +3% \[−2%, +8%\], K=3 +6% \[−1%, +12%\], K=4 +8% \[0%, +15%\]. Starts 3 and 4 sit at special angles (β₁ ≈ π/2, β₂ = ±π/4); what those instances have in common was not investigated.
+
+**11.5 End to end versus the pipeline's own multi-start** (ramp plus 3 random restarts drawn uniformly in \[0, π\], each run to convergence). Proposed procedure: K short runs of 25 evaluations from constant starts, then a polish of the best.
+
+| Procedure | within 0.5% | within 1% | within 2% | Median evaluations |
+| --- | --- | --- | --- | --- |
+| Pipeline: ramp only | 73% | 80% | 82% | 266 |
+| Pipeline: ramp + 3 random | 79% | 85% | 88% | 1234 |
+| Pipeline: ramp + 3 scale-aware | 82% | 86% | 88% | 1110 |
+| Proposed, K=1 | 78% | 83% | 86% | 157 |
+| Proposed, K=2 | 88% | 88% | 91% | 182 |
+| Proposed, K=3 | 92% | 92% | 94% | 206 |
+| Proposed, K=4 | 95% | 96% | 98% | 230 |
+
+- Share within 1% versus the pipeline's multi-start: K=1 −2% \[−5%, +1%\] with 7.9× fewer median evaluations; K=2 +3% \[−2%, +8%\] with 6.8× fewer; K=3 +8% \[+3%, +13%\] with 6.0× fewer; K=4 +11% \[+5%, +17%\] with 5.4× fewer.
+- Reading: one constant plus a budgeted polish matches the pipeline's multi-start at about an eighth of the evaluations; four constants beat it by 11 points at about a fifth. The pipeline's random restarts added only 5 points over the ramp alone at 4.6× the cost.
+- Stronger baseline tested: restarts drawn uniformly in \[0, π\] ignore the problem's energy scale, so I also ran the ramp plus 3 scale-aware random restarts. It improved the multi-start only slightly (86% within 1%, 82% within 0.5%, median 1110 evaluations) and the conclusion held against it: K=4 +10% \[+4%, +16%\] with 4.8x fewer evaluations, K=3 +7% \[+2%, +12%\] with 5.4x fewer, K=2 +3% \[−2%, +7%\] with 6.1x fewer, K=1 −2% \[−8%, +2%\] with 7.1x fewer. The earlier rows reproduced exactly on the rerun.
+
+**11.6 Limits.** Evaluations are counted in a numpy simulator (the saving matters for a Qiskit estimator or a hardware loop). Valid for p=2, 6 assets, budget 3 only; constants must be regenerated for other settings. One universe and one price history. Test instances are correlated (overlapping windows, repeated subsets), so intervals are optimistic. Labels are best-known, not proven optimal.
+
+**11.7 Check on the hardware instance (the problem sent to `ibm_marrakesh`).**
+
+- The numpy simulator agreed with the real `QAOAAnsatz` (built with the pipeline's own cost Hamiltonian) to 1e-9 for every parameter set.
+- The parameters used on the device were already the best found at p=2: a wide search found nothing below the −0.1477 the hardware run used, and all 20 repeats of the pipeline's multi-start reached it.
+- The proposed rule reached the same energy in 103 (K=1) to 178 (K=4) evaluations, against a median of 1200 for the multi-start (11.7x to 6.7x fewer). Extra starts added cost but no benefit on this instance.
+- Exact statevector probabilities: P(optimal) 0.098 and P(feasible) 0.569, matching the sampled simulator numbers (0.098, 0.575). Hardware: 0.100 and 0.485 raw, 0.522 mitigated (Section 7).
+- Reading: for this job the rule would have saved optimizer evaluations but changed nothing about the circuit sent to the device.
 
 ---
 
 ## Appendix: artifacts to reference
 
-- Scripts: `week1_qubo_setup.py` → `week8_backtest.py` (the full pipeline, in order; `week7*` are the continuous-weight extension, `week8` the backtest; `week8b_drift_backtest.py` is a cross-check variant; `week8c_budget_sweep.py` is the budget sweep).
+- Scripts: `week1_qubo_setup.py` → `week8_backtest.py` (the full pipeline, in order; `week7*` are the continuous-weight extension, `week8` the backtest; `week8b_drift_backtest.py` is a cross-check variant; `week8c_budget_sweep.py` is the budget sweep; `qaoa_instance_generator.py`, `qaoa_init_evaluation.py`, `qaoa_start_portfolio.py`, `qaoa_pipeline_comparison.py` and `week9_hardware_instance_check.py` are the initializer study).
 - Figures: `qaoa_p1_landscape.png`, `qaoa_reps_sweep.png`, `sim_vs_hardware.png`.
-- Data: `qubo_week1.npz`, `ising_week2.npz`, `hw6_pipeline.npz`, `hw6_hardware_result.npz`, `continuous_weights_week5.npz`, `prices_long_cache.csv` (created by the first backtest run).
+- Data: `qubo_week1.npz`, `ising_week2.npz`, `hw6_pipeline.npz`, `hw6_hardware_result.npz`, `continuous_weights_week5.npz`, `prices_long_cache.csv` (created by the first backtest run), `qaoa_instances.npz` (the 600-instance initializer dataset).
 - Repo: `github.com/Lbct99/QAOA`.
 
 ---

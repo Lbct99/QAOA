@@ -179,6 +179,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     tol = args.tol
+    tol_label = f"{tol * 100:g}%"          # 0.005 -> '0.5%', 0.01 -> '1%'
 
     D = load(args.data)
     p, n = D["p"], len(D["opt_energy"])
@@ -233,9 +234,9 @@ def main():
             print(f"  optimized {j + 1}/{len(test)} test instances")
 
     # --- report ---
-    print(f"\n=== Test results ({len(test)} instances). 'within' = best-so-far gap < {tol:.0%} of the energy span ===")
+    print(f"\n=== Test results ({len(test)} instances). 'within' = best-so-far gap < {tol_label} of the energy span ===")
     header = f"{'start':14s} {'median gap@1':>13s}" + "".join(f"{'within@' + str(k):>11s}" for k in KS) \
-             + f"{'evals to ' + format(tol, '.0%'):>14s}{'final within':>13s}{'median evals':>13s}"
+             + f"{'evals to ' + tol_label:>14s}{'final within':>14s}{'median evals':>14s}"
     print(header)
     reach = {m: {k: np.array([reached_at(t, k, tol) for t in traces[m]]) for k in KS} for m in methods}
     for m in methods:
@@ -245,7 +246,7 @@ def main():
         fin = np.mean([t[-1] < tol for t in traces[m]])
         nfev = np.median([len(t) for t in traces[m]])
         print(f"{m:14s} {g1:13.4f}" + "".join(f"{np.mean(reach[m][k]):11.0%}" for k in KS)
-              + f"{med_ev:14.0f}{fin:13.0%}{nfev:13.0f}")
+              + f"{med_ev:14.0f}{fin:14.0%}{nfev:14.0f}")
     print("('evals to' = median over instances that reached the threshold; blank/nan = none did)")
 
     # --- paired comparisons at k=25 and k=1 ---
