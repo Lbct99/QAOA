@@ -1,34 +1,41 @@
 """
-Week 11 -- Backend benchmark: how much does the result depend on the device and the day?
+Week 11 -- Backend benchmark and day-on-day monitor.
 
-Your pipeline picks a backend with `least_busy`, which only makes sense if devices and days behave
-alike. This script runs the SAME p=2 circuit (the constant-start rule's parameters, for the 6-stock
-problem you already ran) as ONE JOB PER BACKEND, one circuit and 4096 shots each, and compares:
+Your pipeline picks a backend with `least_busy`. That only makes sense if devices and days behave alike.
+This script runs the SAME p=2 circuit (the constant-start rule's parameters, for the 6-stock problem you
+already ran) as ONE JOB PER BACKEND (one circuit, 4096 shots) and keeps a permanent record, so you can repeat
+it day after day and watch the retention over time.
 
-  * a repeat on ibm_marrakesh, the backend of your first job, on a different day:
-    how much does the retention drift from day to day?
-  * other backends: is any clearly better or worse than that day-to-day spread?
+Metric: measured energy <H_C> over all counts. Noise pulls it toward 0 (the uniform mixture has energy
+exactly 0), so retention = measured energy / ideal energy; one run's standard error is about 1%.
+Your first job (hw6_hardware_result.npz) is the first point of the series.
 
-Metric: measured energy <H_C> over all counts. Noise pulls it toward 0 (the uniform mixture has
-energy exactly 0), so retention = measured energy / ideal energy; its standard error is about 1%.
-The first job (hw6_hardware_result.npz) is the baseline. Differences between backends only mean
-something if they are larger than the day-to-day difference on the same backend.
+What accumulates (keep these files; commit them to git):
+    week11_runs.jsonl    one line per submitted job: time, backend, job id, depth, gates, note
+    week11_counts.json   the measured counts of every finished job, cached on first retrieval
+                         (IBM keeps job results for a limited time, so retrieve soon after jobs finish)
 
-Each backend gets its own transpilation (its own topology and layout). Readout error is not mitigated,
-so it counts as part of device quality. Expect no change in what the best portfolio is: this is about
-variability and device choice, not about better answers.
+The analysis separates shot noise from real run-to-run drift: for each backend it compares the observed
+scatter of the energies with what shot noise alone would give (a chi-square test), then ranks backends
+with honest uncertainties. With only a few runs these statements are rough; they sharpen as days add up.
 
-SAFETY. The default is a free OFFLINE DRY RUN on noisy simulators of the backends. Nothing is sent to
-IBM unless you pass --submit. Open Plan time is counted in seconds of quantum time: look at what your
-first job used on the IBM jobs page; this benchmark uses roughly that much per backend (without the
-mitigation calibration). Keep (number of backends) x (first job's seconds) well below what you have left.
+Suggested routine (check Open Plan usage after the first day to see what one job costs):
+    day 1:  --submit --backends ibm_marrakesh ibm_marrakesh ibm_fez ibm_kingston     (the repeat gives the
+            same-session spread); later days: whichever backends your budget allows, same command style.
+    after the jobs finish:  --retrieve
+
+SAFETY. The default is a free OFFLINE DRY RUN on noisy simulators of the backends. Nothing is sent to IBM
+unless you pass --submit. Open Plan time is counted in seconds of quantum time: each job costs about what
+your first job used (without its mitigation calibration). Each backend gets its own transpilation.
+Readout error is not mitigated, so it counts as part of device quality.
 
 Modes:
     python week11_backend_benchmark.py --list-backends
-    python week11_backend_benchmark.py                                   # free offline dry run
+    python week11_backend_benchmark.py --backends ibm_marrakesh ibm_marrakesh ibm_fez ibm_kingston   # free dry run
     python week11_backend_benchmark.py --submit --backends ibm_marrakesh ibm_marrakesh ibm_fez ibm_kingston
-    python week11_backend_benchmark.py --retrieve                        # fetch finished jobs and analyze
-Options: --shots 4096, --data hw6_pipeline.npz, --baseline hw6_hardware_result.npz, --max-jobs 4
+    python week11_backend_benchmark.py --retrieve                        # fetch finished jobs, analyze the series
+Options: --note "text" (stored with each submitted job), --shots 4096, --max-jobs 4,
+         --data hw6_pipeline.npz, --baseline hw6_hardware_result.npz
 """
 
 import os
@@ -38,14 +45,18 @@ for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
 import argparse
+import json
 import warnings
+from datetime import datetime
 
 import numpy as np
+from scipy.stats import chi2 as chi2_dist
 
 from qaoa_instance_generator import QAOASim
 from week10_depth_experiment import rule_params, numpy_probs, count_stats
 
-META_FILE = "week11_job_meta.npz"
+LOG_FILE = "week11_runs.jsonl"
+COUNTS_FILE = "week11_counts.json"
 DEFAULT_BACKENDS = ["ibm_marrakesh", "ibm_fez", "ibm_kingston"]   # what --list-backends showed for your account
 
 
@@ -62,55 +73,111 @@ def label_list(names):
     return out
 
 
-def report(rows, base, ideal_E, ideal_Popt, ideal_Pfeas, dry=False):
-    """rows: dicts with name, depth, twoq, stats. base: dict(stats, name) or None."""
-    if dry:
-        print("\n*** DRY RUN: the rows below are SIMULATED (noisy models of the backends). Their numbers, and any")
-        print("*** comparison with your real first job, say nothing about the real devices; this only tests the mechanics.")
+def read_log():
+    if not os.path.exists(LOG_FILE):
+        return []
+    with open(LOG_FILE) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def append_log(entry):
+    with open(LOG_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def load_counts():
+    if os.path.exists(COUNTS_FILE):
+        with open(COUNTS_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def save_counts(cache):
+    with open(COUNTS_FILE, "w") as f:
+        json.dump(cache, f)
+
+
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+def dry_report(rows, ideal_E, ideal_Popt, ideal_Pfeas):
+    print("\n*** DRY RUN: the rows below are SIMULATED (noisy models of the backends). Their numbers say nothing")
+    print("*** about the real devices (the offline models are more optimistic than your real job); this only")
+    print("*** tests the mechanics.")
     print(f"\nIdeal (no noise): energy {ideal_E:.4f}, P(optimal) {ideal_Popt:.3f}, P(feasible) {ideal_Pfeas:.3f}\n")
-    head = (f"{'run':28s} {'depth':>6s} {'2Q gates':>9s} {'measured E (+- SE)':>20s} {'retention':>10s} "
-            f"{'P(opt)':>8s} {'P(feas)':>8s} {'z vs first job':>15s}")
-    print(head)
-    if base:
-        s = base["stats"]
-        print(f"{base['name']:28s} {'':>6s} {'':>9s} {s['E']:10.4f} +- {s['seE']:.4f} {s['E'] / ideal_E:10.2f} "
-              f"{s['Popt']:8.3f} {s['Pfeas']:8.3f} {'(baseline)':>15s}")
+    print(f"{'run':22s} {'depth':>6s} {'2Q gates':>9s} {'measured E (+- SE)':>20s} {'retention':>10s} {'P(opt)':>8s} {'P(feas)':>8s}")
     for r in rows:
         s = r["stats"]
-        z = ""
-        if base:
-            z = "n/a (simulated)" if dry else f"{(s['E'] - base['stats']['E']) / np.hypot(s['seE'], base['stats']['seE']):+.1f}"
-        print(f"{r['name']:28s} {r['depth']:6d} {r['twoq']:9d} {s['E']:10.4f} +- {s['seE']:.4f} {s['E'] / ideal_E:10.2f} "
-              f"{s['Popt']:8.3f} {s['Pfeas']:8.3f} {z:>15s}")
-
-    if not rows:
-        return
-    best = max(rows, key=lambda r: r["stats"]["E"] / ideal_E)      # retention: higher is better
-    print(f"\nHighest retention among the new runs: {best['name']} ({best['stats']['E'] / ideal_E:.2f}).")
-    # same backend, several runs: how far apart are two runs submitted in the same session?
-    by_backend = {}
+        print(f"{r['name']:22s} {r['depth']:6d} {r['twoq']:9d} {s['E']:10.4f} +- {s['seE']:.4f} {s['E'] / ideal_E:10.2f} "
+              f"{s['Popt']:8.3f} {s['Pfeas']:8.3f}")
+    by = {}
     for r in rows:
-        by_backend.setdefault(r["name"].split(" #")[0], []).append(r)
-    for nm, rs in by_backend.items():
+        by.setdefault(r["name"].split(" #")[0], []).append(r)
+    for nm, rs in by.items():
         for a, b in zip(rs[:-1], rs[1:]):
             d = a["stats"]["E"] - b["stats"]["E"]
             se = np.hypot(a["stats"]["seE"], b["stats"]["seE"])
-            print(f"Same-session repeat on {nm}: {a['name']} - {b['name']} = {d:+.4f} +- {se:.4f} (z = {d / se:+.1f}) -> "
+            print(f"\nSame-session repeat on {nm}: {a['name']} - {b['name']} = {d:+.4f} +- {se:.4f} (z = {d / se:+.1f}) -> "
                   + ("consistent with shot noise" if abs(d / se) < 2 else "more than shot noise"))
-    if base and not dry:
-        same = [r for r in rows if r["name"].split(" #")[0] == base["name"].split(" (")[0]]
-        for r in same:
-            s, b = r["stats"], base["stats"]
-            d = s["E"] - b["E"]
-            se = np.hypot(s["seE"], b["seE"])
-            print(f"Day-to-day on {r['name']}: E(new) - E(first job) = {d:+.4f} +- {se:.4f} (z = {d / se:+.1f}) -> "
-                  + ("consistent with shot noise" if abs(d / se) < 2 else "more than shot noise: retention drifts from day to day"))
-    print("\nHow to read this: a backend only counts as better or worse if its retention differs from the other runs by")
-    print("more than the day-to-day spread on ibm_marrakesh; with a single repeat that spread is itself a rough estimate.")
-    print("Caveats: one job per backend on one day; each backend has its own layout; readout error is unmitigated;")
-    print("P(optimal) is noisy by construction, so lean on the energy.")
 
 
+def series_report(rows, ideal_E, ideal_Popt, ideal_Pfeas):
+    """rows: dicts with time, backend, depth, twoq (or None), stats; first row may be the earlier first job."""
+    print(f"\nIdeal (no noise): energy {ideal_E:.4f}, P(optimal) {ideal_Popt:.3f}, P(feasible) {ideal_Pfeas:.3f}\n")
+    print(f"{'time':17s} {'backend':15s} {'depth':>6s} {'2Q':>5s} {'measured E (+- SE)':>20s} {'retention':>10s} "
+          f"{'P(opt)':>8s} {'P(feas)':>8s}")
+    for r in rows:
+        s = r["stats"]
+        dep = "" if r["depth"] is None else str(r["depth"])
+        tq = "" if r["twoq"] is None else str(r["twoq"])
+        print(f"{r['time']:17s} {r['backend']:15s} {dep:>6s} {tq:>5s} {s['E']:10.4f} +- {s['seE']:.4f} "
+              f"{s['E'] / ideal_E:10.2f} {s['Popt']:8.3f} {s['Pfeas']:8.3f}")
+
+    by = {}
+    for r in rows:
+        by.setdefault(r["backend"], []).append(r)
+    print("\nPer backend (retention = measured energy / ideal energy):")
+    summary = {}
+    for b, rs in by.items():
+        E = np.array([r["stats"]["E"] for r in rs])
+        se = np.array([r["stats"]["seE"] for r in rs])
+        n = len(rs)
+        w = 1.0 / se**2
+        mean = float((w * E).sum() / w.sum())
+        unc = float(np.sqrt(1.0 / w.sum()))
+        line = f"  {b:15s} n={n}  mean retention {mean / ideal_E:.3f}"
+        if n >= 2:
+            var_obs = float(E.var(ddof=1))
+            exp_var = float((se**2).mean())
+            stat = float((w * (E - mean) ** 2).sum())
+            pval = float(chi2_dist.sf(stat, n - 1))
+            drift = float(np.sqrt(max(var_obs - exp_var, 0.0)))
+            unc = max(unc, float(np.sqrt(var_obs / n)))
+            verdict = ("consistent with shot noise" if pval >= 0.05 else
+                       f"drift beyond shot noise, about {drift / abs(ideal_E):.3f} retention (1 sigma)")
+            line += (f" +- {unc / abs(ideal_E):.3f}; run-to-run scatter {np.sqrt(var_obs) / abs(ideal_E):.3f} "
+                     f"(shot noise alone: {np.sqrt(exp_var) / abs(ideal_E):.3f}); chi-square p = {pval:.2f} -> {verdict}")
+        else:
+            line += f" +- {unc / abs(ideal_E):.3f} (a single run: shot noise only)"
+        summary[b] = (mean, unc)
+        print(line)
+
+    if len(summary) >= 2:
+        ranked = sorted(summary.items(), key=lambda kv: -kv[1][0] / ideal_E)
+        print("\nRanking by mean retention:")
+        for b, (m, u) in ranked:
+            print(f"  {b:15s} {m / ideal_E:.3f} +- {u / abs(ideal_E):.3f}")
+        (b1, (m1, u1)), (b2, (m2, u2)) = ranked[0], ranked[-1]
+        d, ud = (m1 - m2) / ideal_E, np.hypot(u1, u2) / abs(ideal_E)
+        print(f"Best minus worst ({b1} - {b2}): {d:+.3f} +- {ud:.3f} (z = {d / ud:+.1f}) -> "
+              + ("not distinguishable yet" if d / ud < 2 else "a real difference at this precision"))
+    print("\nHow to read this: a backend only counts as better or worse if its retention differs by more than the")
+    print("run-to-run scatter on a single backend. A drift verdict needs at least 2 runs on a backend and becomes")
+    print("reliable with 5 or more. Caveats: each backend has its own layout and calibration; readout error is")
+    print("unmitigated; P(optimal) is noisy by construction, so lean on the energy.")
+
+
+# ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--data", default="hw6_pipeline.npz")
@@ -118,6 +185,7 @@ def main():
     ap.add_argument("--backends", nargs="+", default=DEFAULT_BACKENDS)
     ap.add_argument("--shots", type=int, default=4096)
     ap.add_argument("--max-jobs", type=int, default=4)
+    ap.add_argument("--note", default="")
     ap.add_argument("--submit", action="store_true")
     ap.add_argument("--retrieve", action="store_true")
     ap.add_argument("--list-backends", action="store_true")
@@ -141,33 +209,39 @@ def main():
     scale = float(np.sqrt(np.sum(h**2) + np.sum(J**2)))
     sim = QAOASim(h, J, 2)
     diag = sim.diag
-    params, e2 = rule_params(sim, scale)
+    params, _ = rule_params(sim, scale)
     pr = numpy_probs(sim, params)
     ideal_E, ideal_Popt, ideal_Pfeas = float(pr @ diag), float(pr[opt_idx]), float(pr[feasible].sum())
     print(f"Instance: budget {budget}; p=2 rule parameters, ideal energy {ideal_E:.4f}")
 
-    base = None
-    if os.path.exists(args.baseline):
-        hw = np.load(args.baseline, allow_pickle=True)
-        base = dict(name=f"{str(hw['backend'])} (first job)",
-                    stats=count_stats(hw["raw_counts"].item(), diag, opt_idx, feasible))
-
-    # ---- retrieve finished jobs ----
+    # ---- retrieve: every logged job, cached locally ----
     if args.retrieve:
-        from qiskit_ibm_runtime import QiskitRuntimeService
-        meta = np.load(META_FILE, allow_pickle=True)
-        service = QiskitRuntimeService()
+        entries, cache = read_log(), load_counts()
+        if not entries and not os.path.exists(args.baseline):
+            raise SystemExit(f"No runs logged yet ({LOG_FILE} missing). Submit first.")
+        service = None
         rows = []
-        for i, (nm, jid) in enumerate(zip(meta["names"], meta["job_ids"])):
-            job = service.job(str(jid))
-            status = str(job.status())
-            if "DONE" not in status.upper():
-                print(f"  {nm}: job {jid} not finished yet (status {status}); run --retrieve again later.")
-                continue
-            counts = job.result()[0].data.meas.get_counts()
-            rows.append(dict(name=str(nm), depth=int(meta["depth"][i]), twoq=int(meta["twoq"][i]),
-                             stats=count_stats(counts, diag, opt_idx, feasible)))
-        report(rows, base, ideal_E, ideal_Popt, ideal_Pfeas)
+        if os.path.exists(args.baseline):
+            hw = np.load(args.baseline, allow_pickle=True)
+            rows.append(dict(time="first job", backend=str(hw["backend"]), depth=None, twoq=None,
+                             stats=count_stats(hw["raw_counts"].item(), diag, opt_idx, feasible)))
+        for e in entries:
+            jid = e["job_id"]
+            if jid not in cache:
+                if service is None:
+                    from qiskit_ibm_runtime import QiskitRuntimeService
+                    service = QiskitRuntimeService()
+                job = service.job(jid)
+                status = str(job.status())
+                if "DONE" not in status.upper():
+                    print(f"  {e['backend']} job {jid} ({e['time']}): status {status}; run --retrieve again later.")
+                    continue
+                counts = job.result()[0].data.meas.get_counts()
+                cache[jid] = {str(k): int(v) for k, v in counts.items()}
+                save_counts(cache)
+            rows.append(dict(time=e["time"].replace("T", " ")[:16], backend=e["backend"], depth=e["depth"],
+                             twoq=e["twoq"], stats=count_stats(cache[jid], diag, opt_idx, feasible)))
+        series_report(rows, ideal_E, ideal_Popt, ideal_Pfeas)
         return
 
     # ---- build, transpile, run ----
@@ -197,7 +271,7 @@ def main():
     qc.measure_all()
 
     names = label_list(args.backends)
-    rows, meta_names, meta_ids, meta_depth, meta_twoq = [], [], [], [], []
+    rows = []
     if args.submit:
         from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
         service = QiskitRuntimeService()
@@ -235,20 +309,19 @@ def main():
         if args.submit:
             sampler = SamplerV2(mode=backend)
             job = sampler.run([t], shots=args.shots)
-            meta_names.append(nm); meta_ids.append(job.job_id())
-            meta_depth.append(depth); meta_twoq.append(twoq)
-            np.savez(META_FILE, names=np.array(meta_names), job_ids=np.array(meta_ids),
-                     depth=np.array(meta_depth), twoq=np.array(meta_twoq), shots=args.shots)
-            print(f"    submitted, job ID {job.job_id()} (saved to {META_FILE})")
+            append_log(dict(time=datetime.now().isoformat(timespec="seconds"), backend=real_name,
+                            job_id=job.job_id(), shots=args.shots, depth=depth, twoq=twoq, note=args.note))
+            print(f"    submitted, job ID {job.job_id()} (logged in {LOG_FILE})")
         else:
             counts = AerSimulator.from_backend(backend).run(t, shots=args.shots, seed_simulator=100 + i).result().get_counts()
             rows.append(dict(name=nm, depth=depth, twoq=twoq, stats=count_stats(counts, diag, opt_idx, feasible)))
 
     if args.submit:
-        print(f"\nAll jobs submitted. They queue independently and may finish at different times.\n"
-              f"Fetch results with:  python week11_backend_benchmark.py --retrieve")
+        print("\nAll jobs submitted and logged. They queue independently and may finish at different times.\n"
+              "Fetch and analyze with:  python week11_backend_benchmark.py --retrieve\n"
+              "Repeat the --submit command on other days to build the series.")
         return
-    report(rows, base, ideal_E, ideal_Popt, ideal_Pfeas, dry=True)
+    dry_report(rows, ideal_E, ideal_Popt, ideal_Pfeas)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,7 @@
+{"time": "2026-10-26T17:13:10", "backend": "ibm_marrakesh", "job_id": "dbfno5fsstms73fe92bg", "shots": 4096, "depth": 256, "twoq": 109, "note": ""}
+{"time": "2026-10-26T17:13:13", "backend": "ibm_fez", "job_id": "dbfno68m94ac738tvglg", "shots": 4096, "depth": 256, "twoq": 109, "note": ""}
+{"time": "2026-10-26T17:13:16", "backend": "ibm_kingston", "job_id": "dbfno6vsstms73fe92g0", "shots": 4096, "depth": 256, "twoq": 109, "note": ""}
+{"time": "2026-10-27T11:24:19", "backend": "ibm_marrakesh", "job_id": "dbg7nkpj4t8s73abp9e0", "shots": 4096, "depth": 257, "twoq": 109, "note": "day 2"}
+{"time": "2026-10-27T11:24:20", "backend": "ibm_marrakesh", "job_id": "dbg7nl5jm0ks73eg1uog", "shots": 4096, "depth": 257, "twoq": 109, "note": "day 2"}
+{"time": "2026-10-27T11:24:24", "backend": "ibm_fez", "job_id": "dbg7nm5rd2mc73cu50k0", "shots": 4096, "depth": 256, "twoq": 109, "note": "day 2"}
+{"time": "2026-10-27T11:24:27", "backend": "ibm_kingston", "job_id": "dbg7nn1j4t8s73abp9g0", "shots": 4096, "depth": 256, "twoq": 109, "note": "day 2"}
