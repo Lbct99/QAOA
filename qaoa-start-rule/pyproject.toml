@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qaoa-start-rule"
+version = "0.1.2"
+description = "Constant-start rule and budgeted optimizer for p=2 QAOA on small portfolio problems (a rule, not a trained network)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["numpy", "scipy"]
+
+[project.scripts]
+qaoa-start-rule-onnx = "qaoa_start_rule.onnx_export:main"
+
+[project.optional-dependencies]
+onnx = ["onnx", "onnxruntime"]
+qiskit = ["qiskit", "qiskit-aer"]
+test = ["pytest"]
+
+[tool.setuptools]
+packages = ["qaoa_start_rule"]
