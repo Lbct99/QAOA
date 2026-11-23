@@ -84,7 +84,16 @@ def main():
     print(f"\nSubmitting ONE job, {SHOTS} shots, to {backend.name}...")
     job = sampler.run([transpiled], shots=SHOTS)
     print(f"Job ID: {job.job_id()} -- check status at https://quantum.ibm.com/jobs")
-
+    active = sorted({transpiled.find_bit(q).index
+                     for inst in transpiled.data if inst.operation.num_qubits == 2
+                     for q in inst.qubits})
+    try:
+        cal_ts = str(backend.properties().last_update_date)
+    except Exception as e:
+        cal_ts = f"unavailable ({type(e).__name__})"
+    print("cal:", cal_ts, "| measured qubits:", physical_qubits,
+          "| 2Q-active qubits:", active, "| depth:", transpiled.depth())
+          
     result = job.result()
     raw_counts = result[0].data.meas.get_counts()
 
@@ -106,6 +115,25 @@ def main():
 
     np.savez("hw6_hardware_result.npz", raw_counts=raw_counts,
              mitigated=dict(quasi_probs), backend=backend.name, job_id=job.job_id())
+    import json, os, datetime
+    record = {
+        "job_id": job.job_id(),
+        "backend": backend.name,
+        "submitted_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "calibration_last_update": cal_ts,
+        "shots": SHOTS,
+        "reps": FINAL_REPS,
+        "sim_energy": float(res.fun),
+        "depth": transpiled.depth(),
+        "two_qubit_gates": two_q,
+        "measured_qubits": [int(q) for q in physical_qubits],
+        "active_2q_qubits": [int(q) for q in active],
+        "raw_counts": {k: int(v) for k, v in raw_counts.items()},
+        "mitigated": {k: float(v) for k, v in quasi_probs.items()},
+    }
+    os.makedirs("runs", exist_ok=True)
+    with open(f"runs/{backend.name}_{job.job_id()}.json", "w") as f:
+        json.dump(record, f, indent=1)
     print(f"\nSaved to hw6_hardware_result.npz")
     print("Compare 'raw hardware counts' against the simulator distribution from "
           "week4_six_stock_pipeline.py (reps=2) for the full noise picture: "

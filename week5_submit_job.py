@@ -58,6 +58,7 @@ def main():
     print(f"Submitting ONE job, {SHOTS} shots, to {backend.name}...")
     job = sampler.run([qc], shots=SHOTS)
     print(f"Job ID: {job.job_id()}  -- check status at https://quantum.ibm.com/jobs")
+    print(backend.properties().last_update_date)  # transpiled.layout.final_index_layout(), transpiled.depth(), job.job_id())
 
     result = job.result()
     counts = result[0].data.meas.get_counts()

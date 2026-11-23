@@ -5,3 +5,6 @@ pycache/
 *.egg-info/
 
 *.ipynb
+
+*.onnx
+*.onnx@
